@@ -13,6 +13,41 @@ Considerations
 Just some considerations that came up while writing the catcher.
 
 
+Why this Approach?
+~~~~~~~~~~~~~~~~~~
+
+Well, it's the cleanest I could find. :)
+
+No, seriously, when compared to try/except, it requires the same number of levels
+of indentation - exactly one. This can be achieved by registering handlers before
+entering the with block.
+
+Other than that, the semantics and naming are similar to those of try/except so that
+it should be relatively easy to understand the concept.
+
+
+Alternative Approaches
+~~~~~~~~~~~~~~~~~~~~~~
+
+First, I wanted to use normal try/except BaseException and with blocks for the
+individual error handlers. However, this doesn't work because there is no sane way
+for __enter__() to skip the exception of the block. It's possible with some nasty
+hacks, but that's not bearable for something so fundamental as exception handling.
+
+
+Performance
+~~~~~~~~~~~
+
+Could be better.
+
+This probably is due to the amount of function calling (decorators, handler
+registration, enter/exit of the context manager, type checking, handler execution)
+when compared to a plain try/except.
+
+After all, I think the impact of this is negligible when something like nurseries
+and task switching are in place anyway, but it surely needs serious profiling.
+
+
 Handling MultiError/ExceptionGroup only
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -38,3 +73,11 @@ providing two with blocks in one. The user would then register handlers like so:
     async with trio.open_nursery() as nursery:
         @nursery.catcher.except_(ValueError)
         ...
+
+
+Is the Sync Implementation Really Needed?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+AsyncCatcher supports both sync and async handlers, and I can't think of a situation
+in which you would need to catch a MultiError outside of an async function anyway, so
+maybe there should only be one Catcher class which provides the ``async with`` variant.
