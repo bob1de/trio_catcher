@@ -29,10 +29,58 @@ it should be relatively easy to understand the concept.
 Alternative Approaches
 ~~~~~~~~~~~~~~~~~~~~~~
 
+Comparison to trio/exceptiongroup#5
+___________________________________
+
+Another decorator-based approach was suggested by @njsmith in `this issue
+<https://github.com/python-trio/exceptiongroup/issues/5>`_. Here are some points in
+which trio_catcher differs from this implementation:
+
+* Multiple exceptions can be handled separately in a single ``with`` block without nesting.
+* A handler is called multiple times if multiple exceptions of a type the handler
+  was registered for were caught. This can be disabled by passing ``once=True``
+  at handler registration time.
+* Each handler can catch multiple exceptions (of same or different type) at once. This
+  allows handling semantically-linked exceptions together. A handler is only called
+  if all the exception types it requires are present.
+  **This requires the experimental variant in the except-multiple branch! In the
+  master branch, only one exception can be caught at a time.**
+* Each handler can return any number of exceptions to be re-raised after exception
+  handling is over.
+  **This requires the experimental variant in except-multiple branch! With the master
+  branch, at most one exception may be returned.**
+* A handler can stop exception handling and swallow all exceptions by returning
+  ``True``, as known from ``__exit__``.
+* When a handler (re-)raises an exception, that immediately propagates out of the
+  ``with`` block and replaces any still unhandled exception + those returned by
+  handlers already executed.
+* It supports both sync and async code for exception handling.
+* It uses no predicate functions. Exceptions are selected solely by type and the
+  handler can then implement further checks, if necessary. Whether this is an
+  advantage is probably arguable, but I find it more clear to embed the predicate
+  logic in the handlers.
+* With normal ``try``/``except``, you can also have ``else`` and ``finally``
+  branches. When you need these together with exception handling, you would need
+  another ``try``/``finally`` outside the catch block, requiring one more indentation
+  level. And even then, you could have no ``else`` branch, because that would run
+  even if there were exceptions that were swallowed by your handler. With this
+  implementation, however, else and finally handlers can be registered on the
+  ``AsyncCatcher`` directly, not requiring a ``try`` block at all.
+
+
+``with`` blocks as exception handlers
+_____________________________________
+
 First, I wanted to use normal try/except BaseException and with blocks for the
 individual error handlers. However, this doesn't work because there is no sane way
 for __enter__() to skip the exception of the block. It's possible with some nasty
 hacks, but that's not bearable for something so fundamental as exception handling.
+
+
+Manual Programmatic Handling
+____________________________
+
+TBD, but could be promising as well
 
 
 Performance
