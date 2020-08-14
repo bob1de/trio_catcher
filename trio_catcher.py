@@ -59,7 +59,7 @@ class CatcherBase:
         self._else_handlers.append(handler)
         return handler
 
-    def except_(self, exc_type=Exception, handler=None, *, once=False):
+    def except_(self, *exc_type, once=False):
         """Add a callable for handling some type(s) of exception.
 
         When multiple tasks are involved, they can possibly all raise an exception at
@@ -129,12 +129,30 @@ class CatcherBase:
             This is a keyword-only argument.
         :type  once: bool
         """
-        if handler is None:
-            return functools.partial(self.except_, exc_type, once=once)
 
-        self._check_registrable(handler)
-        self._exc_handlers.append((exc_type, handler, once))
-        return handler
+        # Verify types are correct and no type follows one of its supertypes
+        prev_types = None
+        for types in exc_type:
+            if not isinstance(types, tuple):
+                types = (types,)
+            for _type in types:
+                if not isinstance(_type, type) or not issubclass(_type, BaseException):
+                    raise TypeError(f"{_type} is no subclass of BaseException")
+            if prev_types is not None:
+                for prev in prev_types:
+                    for cur in types:
+                        if issubclass(cur, prev):
+                            raise RuntimeError(
+                                f"{cur!r} may not be given after its supertype {prev!r}"
+                            )
+            prev_types = types
+
+        def _register(handler):
+            self._check_registrable(handler)
+            self._exc_handlers.append((exc_type, handler, once))
+            return handler
+
+        return _register
 
     def finally_(self, handler):
         """Add a callable to run finally, regardless of eventual exceptions.
@@ -168,7 +186,8 @@ class AsyncCatcher(CatcherBase):
             print("handled", repr(exc))
             # Drop the exception by returning None
 
-        @catcher.except_(trio.Cancelled)
+        # Only handle the first Cancelled and keep the others
+        @catcher.except_(trio.Cancelled, once=True)
         async def _(exc):
             print("cancellation intercepted, sleeping for a second")
             with trio.CancelScope(shield=True):
@@ -181,9 +200,26 @@ class AsyncCatcher(CatcherBase):
         def _():
             print("finally")
 
-        async with catcher:
-            # Simulate two concurrent exceptions
-            raise trio.MultiError([ValueError(), trio.Cancelled()])
+        with trio.CancelScope() as cscope:
+            async with catcher:
+                async with trio.open_nursery() as nursery:
+                    # Start a background task
+                    async def task():
+                        await trio.sleep_forever()
+
+                    nursery.start_soon(task)
+
+                    # We can add another finally handler, even from inside the catcher
+                    @catcher.finally_
+                    def _():
+                        print("finally 2")
+
+                    # Cancel the whole nursery from outside
+                    cscope.cancel()
+
+                    # This raises the ValueError + 2x trio.Cancelled (one from task()
+                    # and one from the nursery's main task)
+                    raise ValueError
     """
 
     __slots__ = ()
@@ -206,50 +242,63 @@ class AsyncCatcher(CatcherBase):
                 return
 
             orig_exc = exc
-            excs = exc.exceptions if isinstance(exc, trio.MultiError) else (exc,)
-            # TODO: Maybe this can be avoided and handlers be removed from
-            # self._exc_handlers directly? Of course this would break the repr()
-            # after the catcher was exited...
-            # On the other hand, copying this list should be pretty cheap
-            handlers = list(self._exc_handlers)
-            # Holds replacements to later be performed by MultiError.filter()
-            repl = {}
-            for _exc in excs:
-                for idx, (_type, handler, once) in enumerate(handlers):
-                    if isinstance(_exc, _type):
-                        if inspect.iscoroutinefunction(handler):
-                            result = await handler(_exc)
+            excs = set(exc.exceptions) if isinstance(exc, trio.MultiError) else {exc}
+            orig_excs = frozenset(excs)
+            repl = []
+            for types, handler, once in self._exc_handlers:
+                # Consume exceptions until the handler doesn't fit anymore
+                while excs:
+                    matching_excs = []
+                    for _type in types:
+                        for _exc in excs:
+                            if isinstance(_exc, _type):
+                                matching_excs.append(_exc)
+                                break
                         else:
-                            result = handler(_exc)
-                        if result is None or isinstance(result, BaseException):
-                            if result is not _exc:
-                                repl[_exc] = result
-                            if once:
-                                # Since the loop breaks now anyway, the list can be
-                                # modified while iterating over it
-                                del handlers[idx]
-                            # Proceed with next exception
+                            matching_excs = None
                             break
-                        if result is True:
-                            # Drop all exceptions and exit
-                            return True
-                        raise ValueError(
-                            f"{handler!r} for {_exc!r} returned illegal {result!r}"
+                    if not matching_excs:
+                        # Continue with next handler
+                        break
+                    excs.difference_update(matching_excs)
+                    if inspect.iscoroutinefunction(handler):
+                        result = await handler(*matching_excs)
+                    else:
+                        result = handler(*matching_excs)
+                    if result is True:
+                        # Drop all exceptions and exit
+                        return True
+                    if result is None:
+                        result = ()
+                    elif isinstance(result, BaseException):
+                        result = (result,)
+                    elif isinstance(result, tuple) and any(
+                        not isinstance(item, BaseException) for item in result
+                    ):
+                        raise RuntimeError(
+                            f"{handler!r} for {matching_excs} returned illegal {result}"
                         )
+                    repl.append((matching_excs, result))
+                    if once:
+                        # Proceed with next handler
+                        break
 
-            # Replace exceptions with the results of their handlers
             if repl:
-                exc = trio.MultiError.filter(lambda _exc: repl.get(_exc, _exc), exc)
-                if exc is None:
+                # Build a new MultiError with the remaining exceptions
+                remaining_excs = set(orig_excs)
+                for matching_excs, replacements in repl:
+                    remaining_excs.difference_update(matching_excs)
+                    remaining_excs.update(replacements)
+                if not remaining_excs:
                     # All exceptions handled; leave the with block cleanly
                     return True
+                exc = trio.MultiError(list(remaining_excs))
+                # Re-raise remaining exception outside the with block; set original
+                # exception as cause
+                raise exc from orig_exc
 
-            # Re-raise the possibly reduced exception outside the with block
-            if exc is orig_exc:
-                # Not reduced, re-raise original
-                return
-            # Exception was reduced, set original exception as cause
-            raise exc from orig_exc
+            # Not altered, re-raise original
+            return
 
         finally:
             for handler in self._finally_handlers:
