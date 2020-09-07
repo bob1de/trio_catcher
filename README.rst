@@ -80,7 +80,13 @@ hacks, but that's not bearable for something so fundamental as exception handlin
 Manual Programmatic Handling
 ____________________________
 
-TBD, but could be promising as well
+See ``trio_except.py``. Just execute it to see an example in action.
+
+I like this a lot as well. This style is probably even easier to understand and get
+used to. One doesn't have to learn the semantics of ``AsyncCatcher`` and its handlers.
+
+Also, it's definitely more performant than spinning up ``AsyncCatcher``.
+
 
 
 Performance
